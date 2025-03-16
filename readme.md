@@ -23,7 +23,7 @@ A Telegram bot built with Node.js and TypeScript to interact with the Copperx AP
 1. **Clone the Repository**:
 
    ```bash
-   git clone https://github.com/yourusername/copperx-telegram-bot.git
+   git clone https://github.com/daregoodness1997/copperx-telegram-bot.git
    cd copperx-telegram-bot
    ```
 
