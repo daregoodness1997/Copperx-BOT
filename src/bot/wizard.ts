@@ -1,8 +1,14 @@
-import { Telegraf, Markup } from "telegraf";
+import { Telegraf, Markup, Context } from "telegraf";
+import { Update, Message } from "telegraf/typings/core/types/typegram";
 import { CopperxService } from "../services/copperx";
 import { PusherService } from "../services/pusher";
-import { SessionManager, WizardState } from "./session";
+import { SessionManager } from "./session";
 import { Logger } from "../utils/logger";
+
+// Type alias for matched context in regex actions
+type MatchedContext<C extends Context, T extends Update> = C & {
+  match: RegExpExecArray;
+};
 
 export class BotWizard {
   constructor(
@@ -16,7 +22,9 @@ export class BotWizard {
 
   private setupHandlers(): void {
     this.bot.command("start", this.handleStart.bind(this));
-    this.bot.action("wizard_main_menu", this.showMainMenu.bind(this));
+    this.bot.action("wizard_main_menu", this.handleMainMenuAction.bind(this));
+    this.bot.action("wizard_profile", this.handleCheckProfile.bind(this));
+    this.bot.action("wizard_kyc", this.handleCheckKYC.bind(this));
     this.bot.action("wizard_login", this.handleLogin.bind(this));
     this.bot.action("wizard_balance", this.handleBalance.bind(this));
     this.bot.action("wizard_deposit", this.handleDeposit.bind(this));
@@ -47,12 +55,12 @@ export class BotWizard {
     this.bot.on("text", this.handleText.bind(this));
   }
 
-  private async handleStart(ctx: any): Promise<void> {
-    const userId = ctx.from.id.toString();
-    const firstName = ctx.from.first_name || "User";
+  private async handleStart(ctx: Context<Update>): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    const firstName = ctx.from!.first_name || "User";
     const session = await this.sessionManager.get(userId);
     if (session.hasSeenGreeting) {
-      await this.showMainMenu(ctx);
+      await this.displayMainMenu(ctx);
     } else {
       await this.sessionManager.set(userId, { hasSeenGreeting: true });
       await ctx.reply(
@@ -64,18 +72,24 @@ export class BotWizard {
     }
   }
 
-  private async showMainMenu(ctx: any): Promise<void> {
+  private async handleMainMenuAction(ctx: Context<Update>): Promise<void> {
     await ctx.answerCbQuery();
-    const userId = ctx.from.id.toString();
+    await this.displayMainMenu(ctx);
+  }
+
+  private async displayMainMenu(ctx: Context<Update>): Promise<void> {
+    const userId = ctx.from!.id.toString();
     await this.sessionManager.clearWizard(userId);
     await ctx.reply(
       "What would you like to do?",
       Markup.inlineKeyboard([
         [
           Markup.button.callback("Login", "wizard_login"),
-          Markup.button.callback("Check Balance", "wizard_balance"),
+          Markup.button.callback("Check KYC", "wizard_kyc"),
+          Markup.button.callback("Profile", "wizard_profile"),
         ],
         [
+          Markup.button.callback("Check Balance", "wizard_balance"),
           Markup.button.callback("Deposit", "wizard_deposit"),
           Markup.button.callback("Transfer", "wizard_transfer"),
         ],
@@ -87,7 +101,7 @@ export class BotWizard {
     );
   }
 
-  private async handleLogin(ctx: any): Promise<void> {
+  private async handleLogin(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     await this.sessionManager.set(userId, {
       wizard: { step: "login_email", data: {} },
@@ -96,7 +110,7 @@ export class BotWizard {
     await ctx.reply("Please enter your email address:");
   }
 
-  private async handleBalance(ctx: any): Promise<void> {
+  private async handleBalance(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     await ctx.answerCbQuery();
     if (!(await this.sessionManager.isValid(userId))) {
@@ -120,7 +134,7 @@ export class BotWizard {
     );
   }
 
-  private async handleDeposit(ctx: any): Promise<void> {
+  private async handleDeposit(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     await ctx.answerCbQuery();
     if (!(await this.sessionManager.isValid(userId))) {
@@ -146,7 +160,7 @@ export class BotWizard {
     );
   }
 
-  private async handleTransfer(ctx: any): Promise<void> {
+  private async handleTransfer(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     await this.sessionManager.set(userId, {
       wizard: { step: "transfer_type", data: {} },
@@ -164,7 +178,7 @@ export class BotWizard {
     );
   }
 
-  private async handleWithdraw(ctx: any): Promise<void> {
+  private async handleWithdraw(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     await this.sessionManager.set(userId, {
       wizard: { step: "withdraw_amount", data: {} },
@@ -173,7 +187,7 @@ export class BotWizard {
     await ctx.reply("Please enter the amount to withdraw (e.g., 10):");
   }
 
-  private async handleHelp(ctx: any): Promise<void> {
+  private async handleHelp(ctx: Context<Update>): Promise<void> {
     await ctx.answerCbQuery();
     await ctx.reply(
       "Here’s how to use the bot:\n" +
@@ -188,8 +202,111 @@ export class BotWizard {
       ])
     );
   }
+  private async handleCheckKYC(ctx: Context<Update>): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    const session = await this.sessionManager.get(userId);
+    let hasKyc;
+    await ctx.answerCbQuery();
 
-  private async handleTransferEmail(ctx: any): Promise<void> {
+    // Check if user is logged in
+    if (!(await this.sessionManager.isValid(userId))) {
+      await ctx.reply(
+        "🔒 You need to log in to view your kyc status.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("Login", "wizard_login")],
+          [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+        ])
+      );
+      return;
+    }
+
+    const data = await this.copperx.request(
+      "GET",
+      `/api/kycs`,
+      {},
+      session.token
+    );
+
+    if (data.error) {
+      await ctx.reply(`Error: ${data.error}`);
+    } else {
+      hasKyc = data.data.length > 0 ? true : false;
+
+      await ctx.replyWithMarkdown(
+        `📝 *Your KYC Status*\n${
+          hasKyc
+            ? "✅ Your KYC is *completed*! You're all set to use Copperx fully."
+            : "⚠️ Your KYC is *not completed*. Complete it to unlock all features!"
+        }`,
+        Markup.inlineKeyboard([
+          ...(hasKyc
+            ? [[Markup.button.callback("View Profile", "wizard_profile")]]
+            : [
+                [
+                  Markup.button.url(
+                    "Finish KYC",
+                    "https://dashboard.copperx.dev/settings"
+                  ),
+                ],
+                [Markup.button.callback("Refresh Status", "wizard_profile")],
+              ]),
+          [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+        ])
+      );
+    }
+  }
+  private async handleCheckProfile(ctx: Context<Update>): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    const session = await this.sessionManager.get(userId);
+    let profile = "";
+    await ctx.answerCbQuery();
+
+    // Check if user is logged in
+    if (!(await this.sessionManager.isValid(userId))) {
+      await ctx.reply(
+        "🔒 You need to log in to view your profile.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("Login", "wizard_login")],
+          [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+        ])
+      );
+      return;
+    }
+
+    const data = await this.copperx.request(
+      "GET",
+      `/api/auth/me`,
+      {},
+      session.token
+    );
+
+    if (data.error) {
+      await ctx.reply(`Error: ${data.error}`);
+    } else {
+      // Format profile info nicely
+      profile = `
+👤 *Your Profile*
+- *Name*: ${data.firstName} ${data.lastName}
+- *Email*: ${data.email}
+- *Profile Image*: ${
+        data.profileImage ? `[View](${data.profileImage})` : "Not set"
+      }
+- *Type*: ${data.type}
+- *Wallet Address*: \`${data.walletAddress}\`
+- *Wallet Account Type*: ${data.walletAccountType}
+- *Organization ID*: ${session.organizationId || "Not available"}
+    `.trim();
+    }
+
+    await ctx.reply(
+      profile,
+      Markup.inlineKeyboard([
+        [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+      ])
+    );
+  }
+
+  private async handleTransferEmail(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     await this.sessionManager.set(userId, {
       wizard: { step: "transfer_email_amount", data: { type: "email" } },
@@ -198,7 +315,7 @@ export class BotWizard {
     await ctx.reply("Please enter the amount to transfer (e.g., 10):");
   }
 
-  private async handleTransferWallet(ctx: any): Promise<void> {
+  private async handleTransferWallet(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     await this.sessionManager.set(userId, {
       wizard: { step: "transfer_wallet_amount", data: { type: "wallet" } },
@@ -207,7 +324,7 @@ export class BotWizard {
     await ctx.reply("Please enter the amount to transfer (e.g., 10):");
   }
 
-  private async handleCancel(ctx: any): Promise<void> {
+  private async handleCancel(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     await this.sessionManager.clearWizard(userId);
     await ctx.answerCbQuery();
@@ -219,9 +336,11 @@ export class BotWizard {
     );
   }
 
-  private async handleText(ctx: any): Promise<void> {
-    const userId = ctx.from.id.toString();
-    const text = ctx.message.text.trim();
+  private async handleText(ctx: Context<Update>): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    const message = ctx.message as Message.TextMessage | undefined;
+    if (!message || !("text" in message)) return; // Ensure it's a text message
+    const text = message.text.trim();
     const session = await this.sessionManager.get(userId);
     const wizard = session.wizard;
 
@@ -248,11 +367,20 @@ export class BotWizard {
         "/api/auth/email-otp/authenticate",
         { otp: text, email: wizard.data.email, sid: wizard.data.sid }
       );
+      Logger.info("Login authenticate response:", data);
       if (data.error) {
         await ctx.reply(`Error: ${data.error}`);
       } else {
+        if (!data.accessToken || !data.user.organizationId) {
+          Logger.error(
+            "Missing token or organizationId in login response:",
+            data
+          );
+          await ctx.reply("Authentication failed: Invalid server response.");
+          return;
+        }
         await this.sessionManager.set(userId, {
-          token: data.token,
+          token: data.accessToken,
           expires: Date.now() + 3600000,
           organizationId: data.organizationId,
         });
@@ -260,7 +388,11 @@ export class BotWizard {
           "Session after login:",
           await this.sessionManager.get(userId)
         );
-        await this.pusher.setup(userId, data.token, data.organizationId);
+        await this.pusher.setup(
+          userId,
+          data.accessToken,
+          data.user.organizationId
+        );
         await this.sessionManager.clearWizard(userId);
         await ctx.reply(
           "Authenticated! You'll receive deposit notifications.\nWhat next?",
@@ -317,7 +449,7 @@ export class BotWizard {
   }
 
   private async processTransfer(
-    ctx: any,
+    ctx: Context<Update>,
     userId: string,
     endpoint: string,
     extraData: any
@@ -333,6 +465,7 @@ export class BotWizard {
       return;
     }
     const session = await this.sessionManager.get(userId);
+    Logger.info("Session:", session);
     const wizard = session.wizard!;
     const data = await this.copperx.request(
       "POST",
@@ -363,7 +496,10 @@ export class BotWizard {
     }
   }
 
-  private async processWithdraw(ctx: any, userId: string): Promise<void> {
+  private async processWithdraw(
+    ctx: Context<Update>,
+    userId: string
+  ): Promise<void> {
     if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
         "Please log in first.",
@@ -406,16 +542,20 @@ export class BotWizard {
     }
   }
 
-  private async confirmTransferEmail(ctx: any): Promise<void> {
+  private async confirmTransferEmail(
+    ctx: MatchedContext<Context<Update>, Update.CallbackQueryUpdate>
+  ): Promise<void> {
     await this.confirmTransfer(ctx, "send", "email");
   }
 
-  private async confirmTransferWallet(ctx: any): Promise<void> {
+  private async confirmTransferWallet(
+    ctx: MatchedContext<Context<Update>, Update.CallbackQueryUpdate>
+  ): Promise<void> {
     await this.confirmTransfer(ctx, "wallet-withdraw", "address");
   }
 
   private async confirmTransfer(
-    ctx: any,
+    ctx: MatchedContext<Context<Update>, Update.CallbackQueryUpdate>,
     endpoint: string,
     recipientKey: string
   ): Promise<void> {
@@ -444,7 +584,9 @@ export class BotWizard {
     );
   }
 
-  private async confirmWithdraw(ctx: any): Promise<void> {
+  private async confirmWithdraw(
+    ctx: MatchedContext<Context<Update>, Update.CallbackQueryUpdate>
+  ): Promise<void> {
     await ctx.answerCbQuery();
     const [amount, bankId] = ctx.match.slice(1);
     const userId = ctx.from!.id.toString();
