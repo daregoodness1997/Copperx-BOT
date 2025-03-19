@@ -21,12 +21,18 @@ export class CopperxBot {
       EnvConfig.copperxApiUrl
     );
     this.pusher = new PusherService(
+      this.bot,
       EnvConfig.pusherKey,
       EnvConfig.pusherCluster,
       EnvConfig.copperxApiUrl
     );
     this.sessionManager = new SessionManager();
-    this.wizard = new BotWizard(this.bot, this.copperx, this.sessionManager);
+    this.wizard = new BotWizard(
+      this.bot,
+      this.copperx,
+      this.sessionManager,
+      this.pusher
+    );
   }
 
   async launch(): Promise<void> {
@@ -46,14 +52,13 @@ export class CopperxBot {
   }
 
   setupShutdown(): void {
-    process.once("SIGINT", () => this.bot.stop("SIGINT"));
-    process.once("SIGTERM", () => this.bot.stop("SIGTERM"));
-  }
-
-  // Inject bot into PusherService for messaging (temporary workaround)
-  setupPusher(userId: string, token: string, organizationId: string): void {
-    this.pusher.setup(userId, token, organizationId);
-    // Ideally, PusherService should have a method to set a message sender
-    // For now, we'll leave it as a log in PusherService
+    process.once("SIGINT", async () => {
+      await this.sessionManager.disconnect();
+      this.bot.stop("SIGINT");
+    });
+    process.once("SIGTERM", async () => {
+      await this.sessionManager.disconnect();
+      this.bot.stop("SIGTERM");
+    });
   }
 }

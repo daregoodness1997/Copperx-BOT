@@ -1,5 +1,6 @@
 import { Telegraf, Markup } from "telegraf";
 import { CopperxService } from "../services/copperx";
+import { PusherService } from "../services/pusher";
 import { SessionManager, WizardState } from "./session";
 import { Logger } from "../utils/logger";
 
@@ -7,7 +8,8 @@ export class BotWizard {
   constructor(
     private bot: Telegraf,
     private copperx: CopperxService,
-    private sessionManager: SessionManager
+    private sessionManager: SessionManager,
+    private pusher: PusherService
   ) {
     this.setupHandlers();
   }
@@ -48,10 +50,11 @@ export class BotWizard {
   private async handleStart(ctx: any): Promise<void> {
     const userId = ctx.from.id.toString();
     const firstName = ctx.from.first_name || "User";
-    if (this.sessionManager.get(userId).hasSeenGreeting) {
+    const session = await this.sessionManager.get(userId);
+    if (session.hasSeenGreeting) {
       await this.showMainMenu(ctx);
     } else {
-      this.sessionManager.set(userId, { hasSeenGreeting: true });
+      await this.sessionManager.set(userId, { hasSeenGreeting: true });
       await ctx.reply(
         `Hello, ${firstName}! Welcome to the Copperx USDC Bot.\nClick below to begin:`,
         Markup.inlineKeyboard([
@@ -64,7 +67,7 @@ export class BotWizard {
   private async showMainMenu(ctx: any): Promise<void> {
     await ctx.answerCbQuery();
     const userId = ctx.from.id.toString();
-    this.sessionManager.clearWizard(userId);
+    await this.sessionManager.clearWizard(userId);
     await ctx.reply(
       "What would you like to do?",
       Markup.inlineKeyboard([
@@ -86,7 +89,7 @@ export class BotWizard {
 
   private async handleLogin(ctx: any): Promise<void> {
     const userId = ctx.from!.id.toString();
-    this.sessionManager.set(userId, {
+    await this.sessionManager.set(userId, {
       wizard: { step: "login_email", data: {} },
     });
     await ctx.answerCbQuery();
@@ -96,7 +99,7 @@ export class BotWizard {
   private async handleBalance(ctx: any): Promise<void> {
     const userId = ctx.from!.id.toString();
     await ctx.answerCbQuery();
-    if (!this.sessionManager.isValid(userId)) {
+    if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
         "You need to log in first.",
         Markup.inlineKeyboard([
@@ -105,11 +108,12 @@ export class BotWizard {
       );
       return;
     }
+    const session = await this.sessionManager.get(userId);
     const data = await this.copperx.request(
       "GET",
       "/api/wallets/balances",
       null,
-      this.sessionManager.get(userId).token
+      session.token
     );
     await ctx.reply(
       data.error ? `Error: ${data.error}` : `USDC Balance: ${data.usdc || 0}`
@@ -119,7 +123,7 @@ export class BotWizard {
   private async handleDeposit(ctx: any): Promise<void> {
     const userId = ctx.from!.id.toString();
     await ctx.answerCbQuery();
-    if (!this.sessionManager.isValid(userId)) {
+    if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
         "You need to log in first.",
         Markup.inlineKeyboard([
@@ -128,11 +132,12 @@ export class BotWizard {
       );
       return;
     }
+    const session = await this.sessionManager.get(userId);
     const data = await this.copperx.request(
       "POST",
       "/api/wallets/deposit",
       { currency: "USDC" },
-      this.sessionManager.get(userId).token
+      session.token
     );
     await ctx.reply(
       data.error
@@ -143,7 +148,7 @@ export class BotWizard {
 
   private async handleTransfer(ctx: any): Promise<void> {
     const userId = ctx.from!.id.toString();
-    this.sessionManager.set(userId, {
+    await this.sessionManager.set(userId, {
       wizard: { step: "transfer_type", data: {} },
     });
     await ctx.answerCbQuery();
@@ -161,7 +166,7 @@ export class BotWizard {
 
   private async handleWithdraw(ctx: any): Promise<void> {
     const userId = ctx.from!.id.toString();
-    this.sessionManager.set(userId, {
+    await this.sessionManager.set(userId, {
       wizard: { step: "withdraw_amount", data: {} },
     });
     await ctx.answerCbQuery();
@@ -186,7 +191,7 @@ export class BotWizard {
 
   private async handleTransferEmail(ctx: any): Promise<void> {
     const userId = ctx.from!.id.toString();
-    this.sessionManager.set(userId, {
+    await this.sessionManager.set(userId, {
       wizard: { step: "transfer_email_amount", data: { type: "email" } },
     });
     await ctx.answerCbQuery();
@@ -195,7 +200,7 @@ export class BotWizard {
 
   private async handleTransferWallet(ctx: any): Promise<void> {
     const userId = ctx.from!.id.toString();
-    this.sessionManager.set(userId, {
+    await this.sessionManager.set(userId, {
       wizard: { step: "transfer_wallet_amount", data: { type: "wallet" } },
     });
     await ctx.answerCbQuery();
@@ -204,7 +209,7 @@ export class BotWizard {
 
   private async handleCancel(ctx: any): Promise<void> {
     const userId = ctx.from!.id.toString();
-    this.sessionManager.clearWizard(userId);
+    await this.sessionManager.clearWizard(userId);
     await ctx.answerCbQuery();
     await ctx.reply(
       "Action cancelled. Return to the menu?",
@@ -217,7 +222,8 @@ export class BotWizard {
   private async handleText(ctx: any): Promise<void> {
     const userId = ctx.from.id.toString();
     const text = ctx.message.text.trim();
-    const wizard = this.sessionManager.get(userId).wizard;
+    const session = await this.sessionManager.get(userId);
+    const wizard = session.wizard;
 
     if (!wizard) return;
 
@@ -233,6 +239,7 @@ export class BotWizard {
         await ctx.reply(`Error: ${data.error}`);
       } else {
         wizard.data.sid = data.sid;
+        await this.sessionManager.set(userId, { wizard });
         await ctx.reply("OTP sent to your email. Please enter the OTP:");
       }
     } else if (wizard.step === "login_otp") {
@@ -244,14 +251,17 @@ export class BotWizard {
       if (data.error) {
         await ctx.reply(`Error: ${data.error}`);
       } else {
-        this.sessionManager.set(userId, {
-          token: data.accessToken,
+        await this.sessionManager.set(userId, {
+          token: data.token,
           expires: Date.now() + 3600000,
-          organizationId: data.user.organizationId,
+          organizationId: data.organizationId,
         });
-        Logger.info("Session after login:", this.sessionManager.get(userId));
-        // Pusher setup would go here; we'll integrate it later
-        this.sessionManager.clearWizard(userId);
+        Logger.info(
+          "Session after login:",
+          await this.sessionManager.get(userId)
+        );
+        await this.pusher.setup(userId, data.token, data.organizationId);
+        await this.sessionManager.clearWizard(userId);
         await ctx.reply(
           "Authenticated! You'll receive deposit notifications.\nWhat next?",
           Markup.inlineKeyboard([
@@ -273,6 +283,7 @@ export class BotWizard {
         wizard.step === "transfer_email_amount"
           ? "transfer_email_recipient"
           : "transfer_wallet_address";
+      await this.sessionManager.set(userId, { wizard });
       await ctx.reply(
         wizard.data.type === "email"
           ? "Please enter the recipient email:"
@@ -280,9 +291,11 @@ export class BotWizard {
       );
     } else if (wizard.step === "transfer_email_recipient") {
       wizard.data.recipient = text;
+      await this.sessionManager.set(userId, { wizard });
       await this.processTransfer(ctx, userId, "send", { email: text });
     } else if (wizard.step === "transfer_wallet_address") {
       wizard.data.address = text;
+      await this.sessionManager.set(userId, { wizard });
       await this.processTransfer(ctx, userId, "wallet-withdraw", {
         address: text,
       });
@@ -294,9 +307,11 @@ export class BotWizard {
       }
       wizard.data.amount = amount;
       wizard.step = "withdraw_bank";
+      await this.sessionManager.set(userId, { wizard });
       await ctx.reply("Please enter the bank ID:");
     } else if (wizard.step === "withdraw_bank") {
       wizard.data.bankId = text;
+      await this.sessionManager.set(userId, { wizard });
       await this.processWithdraw(ctx, userId);
     }
   }
@@ -307,22 +322,23 @@ export class BotWizard {
     endpoint: string,
     extraData: any
   ): Promise<void> {
-    if (!this.sessionManager.isValid(userId)) {
+    if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
         "Please log in first.",
         Markup.inlineKeyboard([
           [Markup.button.callback("Login", "wizard_login")],
         ])
       );
-      this.sessionManager.clearWizard(userId);
+      await this.sessionManager.clearWizard(userId);
       return;
     }
-    const wizard = this.sessionManager.get(userId).wizard!;
+    const session = await this.sessionManager.get(userId);
+    const wizard = session.wizard!;
     const data = await this.copperx.request(
       "POST",
       `/api/transfers/${endpoint}`,
       { amount: wizard.data.amount, currency: "USDC", ...extraData },
-      this.sessionManager.get(userId).token
+      session.token
     );
     if (data.error) {
       await ctx.reply(`Error: ${data.error}`);
@@ -348,17 +364,18 @@ export class BotWizard {
   }
 
   private async processWithdraw(ctx: any, userId: string): Promise<void> {
-    if (!this.sessionManager.isValid(userId)) {
+    if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
         "Please log in first.",
         Markup.inlineKeyboard([
           [Markup.button.callback("Login", "wizard_login")],
         ])
       );
-      this.sessionManager.clearWizard(userId);
+      await this.sessionManager.clearWizard(userId);
       return;
     }
-    const wizard = this.sessionManager.get(userId).wizard!;
+    const session = await this.sessionManager.get(userId);
+    const wizard = session.wizard!;
     const data = await this.copperx.request(
       "POST",
       "/api/transfers/offramp",
@@ -367,7 +384,7 @@ export class BotWizard {
         bankId: wizard.data.bankId,
         currency: "USDC",
       },
-      this.sessionManager.get(userId).token
+      session.token
     );
     if (data.error) {
       await ctx.reply(`Error: ${data.error}`);
@@ -405,6 +422,7 @@ export class BotWizard {
     await ctx.answerCbQuery();
     const [amount, recipient] = ctx.match.slice(1);
     const userId = ctx.from!.id.toString();
+    const session = await this.sessionManager.get(userId);
     const data = await this.copperx.request(
       "POST",
       `/api/transfers/${endpoint}`,
@@ -413,9 +431,9 @@ export class BotWizard {
         [recipientKey]: recipient,
         currency: "USDC",
       },
-      this.sessionManager.get(userId).token
+      session.token
     );
-    this.sessionManager.clearWizard(userId);
+    await this.sessionManager.clearWizard(userId);
     await ctx.reply(
       data.error
         ? `Error: ${data.error}`
@@ -430,13 +448,14 @@ export class BotWizard {
     await ctx.answerCbQuery();
     const [amount, bankId] = ctx.match.slice(1);
     const userId = ctx.from!.id.toString();
+    const session = await this.sessionManager.get(userId);
     const data = await this.copperx.request(
       "POST",
       "/api/transfers/offramp",
       { amount: parseFloat(amount), bankId, currency: "USDC" },
-      this.sessionManager.get(userId).token
+      session.token
     );
-    this.sessionManager.clearWizard(userId);
+    await this.sessionManager.clearWizard(userId);
     await ctx.reply(
       data.error
         ? `Error: ${data.error}`
