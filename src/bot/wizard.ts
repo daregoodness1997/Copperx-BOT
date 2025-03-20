@@ -5,6 +5,20 @@ import { PusherService } from "../services/pusher";
 import { SessionManager } from "./session";
 import { Logger } from "../utils/logger";
 
+interface Wallet {
+  walletAddress: string;
+  walletType: string;
+}
+interface WalletBalance {
+  walletId: string;
+  balances: {
+    decimals: number;
+    balance: string;
+    symbol: string;
+    address: string;
+  }[];
+}
+
 // Type alias for matched context in regex actions
 type MatchedContext<C extends Context, T extends Update> = C & {
   match: RegExpExecArray;
@@ -23,6 +37,13 @@ export class BotWizard {
   private setupHandlers(): void {
     this.bot.command("start", this.handleStart.bind(this));
     this.bot.action("wizard_main_menu", this.handleMainMenuAction.bind(this));
+    this.bot.action("wizard_wallet", this.handleWalletMenuAction.bind(this));
+    this.bot.action("wizard_wallets", this.handleWallets.bind(this));
+    this.bot.action(
+      "wizard_default_wallet",
+      this.handleGetDefaultWallet.bind(this)
+    );
+    this.bot.action("wizard_balances", this.handleWalletsBalance.bind(this));
     this.bot.action("wizard_profile", this.handleCheckProfile.bind(this));
     this.bot.action("wizard_kyc", this.handleCheckKYC.bind(this));
     this.bot.action("wizard_login", this.handleLogin.bind(this));
@@ -76,6 +97,10 @@ export class BotWizard {
     await ctx.answerCbQuery();
     await this.displayMainMenu(ctx);
   }
+  private async handleWalletMenuAction(ctx: Context<Update>): Promise<void> {
+    await ctx.answerCbQuery();
+    await this.displayWalletMenu(ctx);
+  }
 
   private async displayMainMenu(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
@@ -89,6 +114,11 @@ export class BotWizard {
           Markup.button.callback("Profile", "wizard_profile"),
         ],
         [
+          Markup.button.callback("Wallets Management", "wizard_wallet"),
+          Markup.button.callback("Fund Transfer", "wizard_deposit"),
+          Markup.button.callback("Transfer", "wizard_transfer"),
+        ],
+        [
           Markup.button.callback("Check Balance", "wizard_balance"),
           Markup.button.callback("Deposit", "wizard_deposit"),
           Markup.button.callback("Transfer", "wizard_transfer"),
@@ -97,6 +127,28 @@ export class BotWizard {
           Markup.button.callback("Withdraw", "wizard_withdraw"),
           Markup.button.callback("Help", "wizard_help"),
         ],
+      ])
+    );
+  }
+
+  private async displayWalletMenu(ctx: Context<Update>): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    await this.sessionManager.clearWizard(userId);
+    await ctx.reply(
+      "Wallet Management",
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback("Get All Wallets", "wizard_wallets"),
+          Markup.button.callback("Get All Balances", "wizard_balances"),
+        ],
+        [
+          Markup.button.callback("Get Default Wallet", "wizard_default_wallet"),
+          Markup.button.callback(
+            "Set Default Wallet",
+            "wizard_default_wallet_set"
+          ),
+        ],
+        [Markup.button.callback("Transaction History", "wizard_balance")],
       ])
     );
   }
@@ -131,6 +183,113 @@ export class BotWizard {
     );
     await ctx.reply(
       data.error ? `Error: ${data.error}` : `USDC Balance: ${data.usdc || 0}`
+    );
+  }
+
+  private async handleWallets(ctx: Context<Update>): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    await ctx.answerCbQuery();
+    if (!(await this.sessionManager.isValid(userId))) {
+      await ctx.reply(
+        "You need to log in first.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("Login", "wizard_login")],
+        ])
+      );
+      return;
+    }
+    const session = await this.sessionManager.get(userId);
+    const data = (await this.copperx.request(
+      "GET",
+      "/api/wallets",
+      null,
+      session.token
+    )) as Wallet[];
+
+    const message =
+      `*📌 Available Wallets:*\n\n` +
+      data
+        .map((p: Wallet) => `💰 *${p.walletAddress}*\n📝 _${p.walletType}_\n`)
+        .join("\n");
+
+    await ctx.reply(
+      message,
+
+      Markup.inlineKeyboard([
+        [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+      ])
+    );
+  }
+  private async handleWalletsBalance(ctx: Context<Update>): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    await ctx.answerCbQuery();
+    if (!(await this.sessionManager.isValid(userId))) {
+      await ctx.reply(
+        "You need to log in first.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("Login", "wizard_login")],
+        ])
+      );
+      return;
+    }
+    const session = await this.sessionManager.get(userId);
+    const data = (await this.copperx.request(
+      "GET",
+      "/api/wallets/balances",
+      null,
+      session.token
+    )) as WalletBalance[];
+
+    const message =
+      `*📌 Available Wallets Balance:*\n\n` +
+      data
+        .map((wallet) =>
+          wallet.balances
+            .map(
+              (balance) =>
+                `💰 *${balance.address}*\n📝 _${balance.balance}_\n _${balance.symbol}_`
+            )
+            .join("\n")
+        )
+        .join("\n");
+
+    await ctx.reply(
+      message,
+
+      Markup.inlineKeyboard([
+        [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+      ])
+    );
+  }
+
+  private async handleGetDefaultWallet(ctx: Context<Update>): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    await ctx.answerCbQuery();
+    if (!(await this.sessionManager.isValid(userId))) {
+      await ctx.reply(
+        "You need to log in first.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("Login", "wizard_login")],
+        ])
+      );
+      return;
+    }
+    const session = await this.sessionManager.get(userId);
+    const data = await this.copperx.request(
+      "GET",
+      "/api/wallets/default",
+      null,
+      session.token
+    );
+
+    const message = `*📌 Default Wallet:*\n\n 💰 *${data.walletAddress}*\n📝 _${data.walletType}_\n`;
+
+    await ctx.reply(
+      message,
+
+      Markup.inlineKeyboard([
+        [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+      ])
     );
   }
 
@@ -190,7 +349,7 @@ export class BotWizard {
   private async handleHelp(ctx: Context<Update>): Promise<void> {
     await ctx.answerCbQuery();
     await ctx.reply(
-      "Here’s how to use the bot:\n" +
+      "Here's how to use the bot:\n" +
         "- Login: Authenticate with your email.\n" +
         "- Check Balance: View your USDC balance.\n" +
         "- Deposit: Get a deposit address.\n" +
