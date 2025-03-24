@@ -5,6 +5,7 @@ import { PusherService } from "../services/pusher";
 import { SessionManager } from "./session";
 import { Logger } from "../utils/logger";
 
+const MAX_SAFE_BIGINT = BigInt("9223372036854775807");
 interface Wallet {
   walletAddress: string;
   walletType: string;
@@ -996,12 +997,16 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
     } else if (wizard.step === "transfer_email_recipient") {
       wizard.data.recipient = text;
       await this.sessionManager.set(userId, { wizard });
-      await this.processTransfer(ctx, userId, "send", { email: text });
+      await this.processTransfer(ctx, userId, "send", {
+        email: text,
+        purposeCode: "self",
+      });
     } else if (wizard.step === "transfer_wallet_address") {
       wizard.data.address = text;
       await this.sessionManager.set(userId, { wizard });
       await this.processTransfer(ctx, userId, "wallet-withdraw", {
-        address: text,
+        walletAddress: text,
+        purposeCode: "self",
       });
     } else if (wizard.step === "withdraw_amount") {
       const amount = parseFloat(text);
@@ -1042,11 +1047,15 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
     const data = await this.copperx.request(
       "POST",
       `/api/transfers/${endpoint}`,
-      { amount: wizard.data.amount, currency: "USDC", ...extraData },
+      {
+        amount: String(BigInt(Math.floor(wizard.data.amount * 1000000000))),
+        currency: "USDC",
+        ...extraData,
+      },
       session.token
     );
     if (data.error) {
-      await ctx.reply(`Error: ${data.error}`);
+      await ctx.reply(`Error: ${JSON.stringify(data.error)}`);
     } else {
       const recipient = extraData.email || extraData.address;
       await ctx.reply(
