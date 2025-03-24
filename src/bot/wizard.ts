@@ -8,6 +8,8 @@ import { Logger } from "../utils/logger";
 interface Wallet {
   walletAddress: string;
   walletType: string;
+  id: string;
+  isDefault?: boolean;
 }
 interface WalletBalance {
   walletId: string;
@@ -17,6 +19,118 @@ interface WalletBalance {
     symbol: string;
     address: string;
   }[];
+}
+
+interface Session {
+  token: string;
+  wizard?: {
+    step: string;
+    data: {
+      selectedWalletId: string | null;
+    };
+  };
+}
+
+// Type definitions based on the response payload
+interface TransactionHistoryResponse {
+  page: number;
+  limit: number;
+  count: number;
+  hasMore: boolean;
+  data: Transaction[];
+}
+
+interface Transaction {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  organizationId: string;
+  status: string;
+  customerId: string;
+  customer: Customer;
+  type: string;
+  sourceCountry: string;
+  destinationCountry: string;
+  destinationCurrency: string;
+  amount: string;
+  currency: string;
+  amountSubtotal: string;
+  totalFee: string;
+  feePercentage: string;
+  feeCurrency: string;
+  invoiceNumber?: string;
+  invoiceUrl?: string;
+  sourceOfFundsFile?: string;
+  note?: string;
+  purposeCode: string;
+  sourceOfFunds: string;
+  recipientRelationship: string;
+  sourceAccountId: string;
+  destinationAccountId: string;
+  paymentUrl?: string;
+  mode: string;
+  isThirdPartyPayment: boolean;
+  transactions: InnerTransaction[];
+  destinationAccount: Account;
+  sourceAccount: Account;
+  senderDisplayName: string;
+}
+
+interface Customer {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  name: string;
+  businessName: string;
+  email: string;
+  country: string;
+}
+
+interface InnerTransaction {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  organizationId: string;
+  type: string;
+  providerCode: string;
+  kycId: string;
+  transferId: string;
+  status: string;
+  externalStatus: string;
+  fromAccountId: string;
+  toAccountId: string;
+  fromAmount: string;
+  fromCurrency: string;
+  toAmount: string;
+  toCurrency: string;
+  totalFee: string;
+  feeCurrency: string;
+  transactionHash: string;
+  depositAccount: Account;
+  externalTransactionId: string;
+  externalCustomerId: string;
+  depositUrl: string;
+}
+
+interface Account {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  type: string;
+  country: string;
+  network: string;
+  accountId: string;
+  walletAddress?: string;
+  bankName?: string;
+  bankAddress?: string;
+  bankRoutingNumber?: string;
+  bankAccountNumber?: string;
+  bankDepositMessage?: string;
+  wireMessage?: string;
+  payeeEmail?: string;
+  payeeOrganizationId?: string;
+  payeeId?: string;
+  payeeDisplayName?: string;
 }
 
 // Type alias for matched context in regex actions
@@ -42,6 +156,14 @@ export class BotWizard {
     this.bot.action(
       "wizard_default_wallet",
       this.handleGetDefaultWallet.bind(this)
+    );
+    this.bot.action(
+      "wizard_default_wallet_set",
+      this.handleSetDefaultWallet.bind(this)
+    );
+    this.bot.action(
+      "transaction_history",
+      this.handleGetTransactionHistory.bind(this)
     );
     this.bot.action("wizard_balances", this.handleWalletsBalance.bind(this));
     this.bot.action("wizard_profile", this.handleCheckProfile.bind(this));
@@ -148,7 +270,7 @@ export class BotWizard {
             "wizard_default_wallet_set"
           ),
         ],
-        [Markup.button.callback("Transaction History", "wizard_balance")],
+        [Markup.button.callback("Transaction History", "transaction_history")],
       ])
     );
   }
@@ -162,12 +284,139 @@ export class BotWizard {
     await ctx.reply("Please enter your email address:");
   }
 
+  private async handleSetDefaultWallet(ctx: Context<Update>): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    const session = await this.sessionManager.get(userId);
+
+    try {
+      // Get current session and ensure wizard exists
+      const currentSession = await this.sessionManager.get(userId);
+      if (!currentSession.wizard) {
+        await this.sessionManager.set(userId, {
+          wizard: {
+            step: "set_default_wallet",
+            data: { selectedWalletId: null },
+          },
+        });
+      }
+
+      // Fetch wallets from API
+      const wallets = (await this.copperx.request(
+        "GET",
+        "/api/wallets",
+        null,
+        session.token
+      )) as Wallet[];
+
+      Logger.info(wallets, "wallets information");
+
+      // Get current selected wallet ID from session
+      const selectedWalletId =
+        currentSession.wizard?.data.selectedWalletId || null;
+
+      // Create radio buttons for each wallet with checkmark for selected
+      const walletButtons = wallets.map((wallet) => {
+        const isSelected = wallet.id === selectedWalletId;
+        const buttonText = `${wallet.walletAddress} ${isSelected ? " ✅" : ""}`;
+
+        return [
+          Markup.button.callback(
+            buttonText,
+            `set_wallet_${wallet.id}`,
+            wallet.isDefault && !selectedWalletId // Only show as default if no selection override
+          ),
+        ];
+      });
+
+      // Add navigation buttons
+      const navigationButtons = [
+        [
+          Markup.button.callback("Back", "wizard_main_menu"),
+          Markup.button.callback("Confirm Selection", "wizard_confirm_default"),
+        ],
+      ];
+
+      await ctx.answerCbQuery();
+      // Edit existing message if callback, otherwise send new
+      if (ctx.callbackQuery?.message) {
+        await ctx.editMessageText(
+          "Select your default wallet:",
+          Markup.inlineKeyboard([...walletButtons, ...navigationButtons])
+        );
+      } else {
+        await ctx.reply(
+          "Select your default_wallet:",
+          Markup.inlineKeyboard([...walletButtons, ...navigationButtons])
+        );
+      }
+
+      // Handle wallet selection callback
+      this.bot.action(/^set_wallet_(.+)$/, async (ctx) => {
+        const selectedWalletId = ctx.match[1];
+        await this.sessionManager.set(userId, {
+          wizard: {
+            step: "set_default_wallet",
+            data: { selectedWalletId },
+          },
+        });
+
+        await this.handleSetDefaultWallet(ctx);
+      });
+
+      // Handle confirmation callback
+      this.bot.action("wizard_confirm_default", async (ctx) => {
+        const currentSession = await this.sessionManager.get(userId);
+
+        if (!currentSession.wizard || !currentSession.wizard.data) {
+          await ctx.reply("Session expired. Please start over.");
+          return;
+        }
+
+        const selectedWalletId = currentSession.wizard.data.selectedWalletId;
+
+        if (!selectedWalletId) {
+          await ctx.reply("Please select a wallet first!");
+          return;
+        }
+
+        // Update default wallet via API
+        await this.copperx.request(
+          "POST",
+          `/api/wallets/default`,
+          { walletId: selectedWalletId },
+          session.token
+        );
+
+        // Clear selection after successful update
+        await this.sessionManager.set(userId, {
+          wizard: {
+            step: "set_default_wallet",
+            data: { selectedWalletId: null },
+          },
+        });
+
+        await ctx.reply(
+          "Default wallet updated successfully!",
+          Markup.inlineKeyboard([
+            [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+          ])
+        );
+        await this.handleSetDefaultWallet(ctx);
+      });
+    } catch (error) {
+      Logger.error(error, "Error in handleSetDefaultWallet");
+      await ctx.reply(
+        "An error occurred while fetching wallets. Please try again."
+      );
+    }
+  }
+
   private async handleBalance(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     await ctx.answerCbQuery();
     if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
-        "You need to log in first.",
+        "🔒 You need to log in first.",
         Markup.inlineKeyboard([
           [Markup.button.callback("Login", "wizard_login")],
         ])
@@ -191,7 +440,7 @@ export class BotWizard {
     await ctx.answerCbQuery();
     if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
-        "You need to log in first.",
+        "🔒 You need to log in first.",
         Markup.inlineKeyboard([
           [Markup.button.callback("Login", "wizard_login")],
         ])
@@ -220,12 +469,176 @@ export class BotWizard {
       ])
     );
   }
+
+  private async handleGetTransactionHistory(
+    ctx: Context<Update>
+  ): Promise<void> {
+    const userId = ctx.from!.id.toString();
+    await ctx.answerCbQuery();
+
+    // Check if user is logged in
+    if (!(await this.sessionManager.isValid(userId))) {
+      await ctx.reply(
+        "🔒 You need to log in first.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("Login", "wizard_login")],
+        ])
+      );
+      return;
+    }
+
+    try {
+      const session = await this.sessionManager.get(userId);
+
+      // Fetch transaction history
+      const response = (await this.copperx.request(
+        "GET",
+        "/api/transfers",
+        null,
+        session.token
+      )) as TransactionHistoryResponse;
+
+      Logger.info(response, "transactions");
+
+      if (!response.data || response.data.length === 0) {
+        await ctx.reply(
+          "No transactions found.",
+          Markup.inlineKeyboard([
+            [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+          ])
+        );
+        return;
+      }
+
+      // Format transactions for display
+      const transactionsText = response.data
+        .map((tx, index) => {
+          const date = new Date(tx.createdAt).toLocaleDateString();
+          return `Transaction #${index + 1}
+ID: ${tx.id}
+Date: ${date}
+Type: ${tx.type}
+Status: ${tx.status}
+Amount: ${tx.amount} ${tx.currency}
+From: ${
+            tx.sourceAccount?.walletAddress ||
+            tx.sourceAccount?.bankAccountNumber ||
+            "N/A"
+          }
+To: ${
+            tx.destinationAccount?.walletAddress ||
+            tx.destinationAccount?.bankAccountNumber ||
+            "N/A"
+          }
+Fee: ${tx.totalFee} ${tx.feeCurrency}
+------------------------`;
+        })
+        .join("\n");
+
+      // Create pagination buttons
+      const paginationButtons = [];
+      if (response.page > 1) {
+        paginationButtons.push(
+          Markup.button.callback("Previous", `tx_page_${response.page - 1}`)
+        );
+      }
+      if (response.hasMore) {
+        paginationButtons.push(
+          Markup.button.callback("Next", `tx_page_${response.page + 1}`)
+        );
+      }
+
+      const keyboard = [
+        ...(paginationButtons.length > 0 ? [paginationButtons] : []),
+        [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+      ];
+
+      await ctx.reply(
+        `Transaction History (Page ${response.page} of ${Math.ceil(
+          response.count / response.limit
+        )}):\n\n${transactionsText}`,
+        Markup.inlineKeyboard(keyboard)
+      );
+
+      // Handle pagination callbacks
+      this.bot.action(/^tx_page_(\d+)$/, async (ctx) => {
+        const page = parseInt(ctx.match[1]);
+        const paginatedResponse = (await this.copperx.request(
+          "GET",
+          `/api/transfers?page=${page}&limit=${response.limit}`,
+          null,
+          session.token
+        )) as TransactionHistoryResponse;
+
+        const updatedText = paginatedResponse.data
+          .map((tx, index) => {
+            const date = new Date(tx.createdAt).toLocaleDateString();
+            return `Transaction #${index + 1}
+ID: ${tx.id}
+Date: ${date}
+Type: ${tx.type}
+Status: ${tx.status}
+Amount: ${tx.amount} ${tx.currency}
+From: ${
+              tx.sourceAccount?.walletAddress ||
+              tx.sourceAccount?.bankAccountNumber ||
+              "N/A"
+            }
+To: ${
+              tx.destinationAccount?.walletAddress ||
+              tx.destinationAccount?.bankAccountNumber ||
+              "N/A"
+            }
+Fee: ${tx.totalFee} ${tx.feeCurrency}
+------------------------`;
+          })
+          .join("\n");
+
+        const updatedPagination = [];
+        if (paginatedResponse.page > 1) {
+          updatedPagination.push(
+            Markup.button.callback(
+              "Previous",
+              `tx_page_${paginatedResponse.page - 1}`
+            )
+          );
+        }
+        if (paginatedResponse.hasMore) {
+          updatedPagination.push(
+            Markup.button.callback(
+              "Next",
+              `tx_page_${paginatedResponse.page + 1}`
+            )
+          );
+        }
+
+        await ctx.editMessageText(
+          `Transaction History (Page ${paginatedResponse.page} of ${Math.ceil(
+            paginatedResponse.count / paginatedResponse.limit
+          )}):\n\n${updatedText}`,
+          Markup.inlineKeyboard([
+            ...(updatedPagination.length > 0 ? [updatedPagination] : []),
+            [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+          ])
+        );
+      });
+    } catch (error) {
+      Logger.error(error, "Error fetching transaction history");
+      await ctx.reply(
+        "Error fetching transaction history. Please try again.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("Back to Menu", "wizard_main_menu")],
+        ])
+      );
+    }
+  }
+
   private async handleWalletsBalance(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     await ctx.answerCbQuery();
     if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
-        "You need to log in first.",
+        "🔒 You need to log in first.",
         Markup.inlineKeyboard([
           [Markup.button.callback("Login", "wizard_login")],
         ])
@@ -267,7 +680,7 @@ export class BotWizard {
     await ctx.answerCbQuery();
     if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
-        "You need to log in first.",
+        "🔒 You need to log in first.",
         Markup.inlineKeyboard([
           [Markup.button.callback("Login", "wizard_login")],
         ])
@@ -298,7 +711,7 @@ export class BotWizard {
     await ctx.answerCbQuery();
     if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
-        "You need to log in first.",
+        "🔒 You need to log in first.",
         Markup.inlineKeyboard([
           [Markup.button.callback("Login", "wizard_login")],
         ])
