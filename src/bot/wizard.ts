@@ -12,12 +12,7 @@ import { Logger } from "../utils/logger";
 import {
   Wallet,
   WalletBalance,
-  Session,
-  Transaction,
   TransactionHistoryResponse,
-  InnerTransaction,
-  Customer,
-  Account,
 } from "../interfaces";
 
 type MatchedContext<C extends Context, T extends Update> = C & {
@@ -112,6 +107,58 @@ export class BotWizard {
         await this.sessionManager.set(userId, session);
         await ctx.answerCbQuery();
         await ctx.reply("Enter source of funds (e.g., salary, savings):");
+      }
+    });
+    // New handlers for transfer purpose code selection
+    this.bot.action("transfer_purpose_self", async (ctx) => {
+      const userId = ctx.from!.id.toString();
+      const session = await this.sessionManager.get(userId);
+      if (session.wizard) {
+        session.wizard.data.purposeCode = "self";
+        await this.sessionManager.set(userId, session);
+        await ctx.answerCbQuery();
+        await this.processTransfer(
+          ctx,
+          userId,
+          session.wizard.data.type === "email" ? "send" : "wallet-withdraw",
+          session.wizard.data.type === "email"
+            ? { email: session.wizard.data.recipient }
+            : { walletAddress: session.wizard.data.address }
+        );
+      }
+    });
+    this.bot.action("transfer_purpose_family", async (ctx) => {
+      const userId = ctx.from!.id.toString();
+      const session = await this.sessionManager.get(userId);
+      if (session.wizard) {
+        session.wizard.data.purposeCode = "family";
+        await this.sessionManager.set(userId, session);
+        await ctx.answerCbQuery();
+        await this.processTransfer(
+          ctx,
+          userId,
+          session.wizard.data.type === "email" ? "send" : "wallet-withdraw",
+          session.wizard.data.type === "email"
+            ? { email: session.wizard.data.recipient }
+            : { walletAddress: session.wizard.data.address }
+        );
+      }
+    });
+    this.bot.action("transfer_purpose_business", async (ctx) => {
+      const userId = ctx.from!.id.toString();
+      const session = await this.sessionManager.get(userId);
+      if (session.wizard) {
+        session.wizard.data.purposeCode = "business";
+        await this.sessionManager.set(userId, session);
+        await ctx.answerCbQuery();
+        await this.processTransfer(
+          ctx,
+          userId,
+          session.wizard.data.type === "email" ? "send" : "wallet-withdraw",
+          session.wizard.data.type === "email"
+            ? { email: session.wizard.data.recipient }
+            : { walletAddress: session.wizard.data.address }
+        );
       }
     });
     this.bot.action(
@@ -212,7 +259,6 @@ export class BotWizard {
       const callbackData = (ctx.callbackQuery as CallbackQuery.DataQuery)?.data;
       Logger.info(`Callback data received: ${callbackData}`);
 
-      // Handle wallet selection
       if (callbackData?.startsWith("set_wallet_")) {
         const walletId = callbackData.split("_")[2];
         Logger.info(`Selected wallet ID: ${walletId}`);
@@ -248,10 +294,9 @@ export class BotWizard {
         currentSession.wizard?.data.selectedWalletId || null;
       Logger.info(`Current selected wallet ID: ${selectedWalletId}`);
 
-      // Generate wallet buttons
       const walletButtons = wallets.map((wallet) => {
         const isSelected = wallet.id === selectedWalletId;
-        const buttonText = `${wallet.walletAddress}${isSelected ? " ✅" : ""}`;
+        const buttonText = `${isSelected ? " ✅" : ""}${wallet.walletAddress}`;
         Logger.info(`Button for wallet ${wallet.id}: ${buttonText}`);
         return [Markup.button.callback(buttonText, `set_wallet_${wallet.id}`)];
       });
@@ -310,7 +355,6 @@ export class BotWizard {
         await ctx.reply(newText, newKeyboard);
       }
 
-      // Handle confirmation
       if (callbackData === "wizard_confirm_default") {
         const currentSession = await this.sessionManager.get(userId);
         if (!currentSession.wizard || !currentSession.wizard.data) {
@@ -332,10 +376,7 @@ export class BotWizard {
           session.token
         );
 
-        await this.sessionManager.set(userId, {
-          // Clear wizard state after confirmation
-        });
-
+        await this.sessionManager.set(userId, {});
         await ctx.reply(
           "Default wallet updated successfully!",
           Markup.inlineKeyboard([
@@ -680,7 +721,7 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
         [
           Markup.button.callback("To Email", "wizard_transfer_email"),
           Markup.button.callback("To Wallet", "wizard_transfer_wallet"),
-          Markup.button.callback("Offramp", "wizard_withdraw"),
+          Markup.button.callback("Offramp", "wizard_withdraw"), // Added Offramp option
         ],
         [Markup.button.callback("Cancel", "wizard_cancel")],
       ])
@@ -942,18 +983,28 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
       );
     } else if (wizard.step === "transfer_email_recipient") {
       wizard.data.recipient = text;
+      wizard.step = "transfer_purpose"; // New step for purpose code
       await this.sessionManager.set(userId, { wizard });
-      await this.processTransfer(ctx, userId, "send", {
-        email: text,
-        purposeCode: "self",
-      });
+      await ctx.reply(
+        "Select purpose code:",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("Self", "transfer_purpose_self")],
+          [Markup.button.callback("Family", "transfer_purpose_family")],
+          [Markup.button.callback("Business", "transfer_purpose_business")],
+        ])
+      );
     } else if (wizard.step === "transfer_wallet_address") {
       wizard.data.address = text;
+      wizard.step = "transfer_purpose"; // New step for purpose code
       await this.sessionManager.set(userId, { wizard });
-      await this.processTransfer(ctx, userId, "wallet-withdraw", {
-        walletAddress: text,
-        purposeCode: "self",
-      });
+      await ctx.reply(
+        "Select purpose code:",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("Self", "transfer_purpose_self")],
+          [Markup.button.callback("Family", "transfer_purpose_family")],
+          [Markup.button.callback("Business", "transfer_purpose_business")],
+        ])
+      );
     } else if (wizard.step.startsWith("withdraw_")) {
       const withdrawData = wizard.data.withdrawData || {};
 
@@ -1031,39 +1082,61 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
       await this.sessionManager.clearWizard(userId);
       return;
     }
+
     const session = await this.sessionManager.get(userId);
     const wizard = session.wizard!;
+    const amount = wizard.data.amount!; // Amount in user-friendly format (e.g., 10 USDC)
+    const amountInWei = String(BigInt(Math.floor(amount * 1000000000))); // Convert to smallest unit
+    const purposeCode = wizard.data.purposeCode || "self"; // Use selected purpose code
+
+    // Simulate the transfer request to get fee and other details
     const data = await this.copperx.request(
       "POST",
       `/api/transfers/${endpoint}`,
       {
-        amount: String(BigInt(Math.floor(wizard.data.amount! * 1000000000))),
+        amount: amountInWei,
         currency: "USDC",
+        purposeCode, // Include purpose code in the request
         ...extraData,
       },
       session.token
     );
+
     if (data.error) {
       await ctx.reply(`Error: ${JSON.stringify(data.error)}`);
-    } else {
-      const recipient = extraData.email || extraData.address;
-      await ctx.reply(
-        `Confirm transfer of ${wizard.data.amount} USDC to ${recipient}? Fee: ${
-          data.fee || 0
-        }`,
-        Markup.inlineKeyboard([
-          [
-            Markup.button.callback(
-              "Yes",
-              `wizard_confirm_transfer_${
-                endpoint === "send" ? "email" : "wallet"
-              }_${wizard.data.amount}_${recipient}`
-            ),
-            Markup.button.callback("No", "wizard_cancel"),
-          ],
-        ])
-      );
+      return;
     }
+
+    // Prepare transaction summary
+    const recipient = extraData.email || extraData.walletAddress;
+    const fee = data.fee || "0"; // Fee in USDC (assuming it's returned in the response)
+    const currency = "USDC";
+
+    const summary = `
+📋 *Transaction Summary*
+- *Type*: ${endpoint === "send" ? "Email Transfer" : "Wallet Transfer"}
+- *Amount*: ${amount} ${currency}
+- *Recipient*: ${recipient}
+- *Fee*: ${fee} ${currency}
+- *Purpose*: ${purposeCode}
+- *Total*: ${(parseFloat(amount) + parseFloat(fee)).toFixed(2)} ${currency}
+    `.trim();
+
+    // Display summary with confirmation buttons
+    await ctx.reply(
+      summary,
+      Markup.inlineKeyboard([
+        [
+          Markup.button.callback(
+            "Confirm",
+            `wizard_confirm_transfer_${
+              endpoint === "send" ? "email" : "wallet"
+            }_${amount}_${recipient}`
+          ),
+          Markup.button.callback("Cancel", "wizard_cancel"),
+        ],
+      ])
+    );
   }
 
   private async processWithdraw(
@@ -1143,7 +1216,7 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
   private async confirmTransferWallet(
     ctx: MatchedContext<Context<Update>, Update.CallbackQueryUpdate>
   ): Promise<void> {
-    await this.confirmTransfer(ctx, "wallet-withdraw", "address");
+    await this.confirmTransfer(ctx, "wallet-withdraw", "walletAddress");
   }
 
   private async confirmTransfer(
@@ -1155,13 +1228,17 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
     const [amount, recipient] = ctx.match.slice(1);
     const userId = ctx.from!.id.toString();
     const session = await this.sessionManager.get(userId);
+    const wizard = session.wizard!;
+    const purposeCode = wizard.data.purposeCode || "self";
+
     const data = await this.copperx.request(
       "POST",
       `/api/transfers/${endpoint}`,
       {
-        amount: parseFloat(amount),
+        amount: String(BigInt(Math.floor(parseFloat(amount) * 1000000000))), // Convert to smallest unit
         [recipientKey]: recipient,
         currency: "USDC",
+        purposeCode, // Include purpose code in final request
       },
       session.token
     );
