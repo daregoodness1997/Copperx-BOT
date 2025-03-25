@@ -38,8 +38,8 @@ export class EnvConfig {
   static get redisPort(): string {
     return this.ensureEnv("REDIS_PORT");
   }
-  static get port(): string {
-    return this.ensureEnv("PORT");
+  static get appPort(): string {
+    return this.ensureEnv("APP_PORT");
   }
 
   private static ensureEnv(key: string): string {

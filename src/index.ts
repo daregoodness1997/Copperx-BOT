@@ -2,7 +2,8 @@ import { CopperxBot } from "./bot/bot";
 import { EnvConfig } from "./config/env";
 import express, { Request, Response } from "express";
 const app = express();
-const port = EnvConfig.port || 4000;
+EnvConfig.load();
+const port = Number(EnvConfig.appPort) || 4000;
 
 const bot = new CopperxBot();
 bot.launch();
