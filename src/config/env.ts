@@ -38,6 +38,9 @@ export class EnvConfig {
   static get redisPort(): string {
     return this.ensureEnv("REDIS_PORT");
   }
+  static get port(): string {
+    return this.ensureEnv("PORT");
+  }
 
   private static ensureEnv(key: string): string {
     const value = process.env[key];
