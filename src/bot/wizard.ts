@@ -296,7 +296,7 @@ export class BotWizard {
 
       const walletButtons = wallets.map((wallet) => {
         const isSelected = wallet.id === selectedWalletId;
-        const buttonText = `${wallet.walletAddress}${isSelected ? " ✅" : ""}`;
+        const buttonText = `${isSelected ? " ✅" : ""}${wallet.walletAddress}`;
         Logger.info(`Button for wallet ${wallet.id}: ${buttonText}`);
         return [Markup.button.callback(buttonText, `set_wallet_${wallet.id}`)];
       });
