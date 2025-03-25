@@ -12,8 +12,38 @@ export class PusherService {
     private pusherCluster: string,
     private copperxApiUrl: string
   ) {
-    this.client = new Pusher(pusherKey, { cluster: pusherCluster });
+    this.client = new Pusher(pusherKey, {
+      cluster: pusherCluster,
+      // Add authorizer for private channels
+      authorizer: (channel) => ({
+        authorize: async (socketId, callback) => {
+          try {
+            const response = await axios.post(
+              `${this.copperxApiUrl}/api/notifications/auth`,
+              {
+                socket_id: socketId,
+                channel_name: channel.name,
+              },
+              {
+                headers: { Authorization: `Bearer ${this.token}` }, // Token must be available here
+              }
+            );
+            Logger.info("Pusher auth response:", response.data);
+            callback(null, response.data); // Pass auth data to Pusher
+          } catch (error: any) {
+            Logger.error("Pusher authorization error:", {
+              message: error.message,
+              response: error.response?.data,
+              status: error.response?.status,
+            });
+            callback(error, null); // Pass error to Pusher
+          }
+        },
+      }),
+    });
   }
+
+  private token: string | undefined; // Store token for authorization
 
   async setup(
     userId: string,
@@ -33,12 +63,21 @@ export class PusherService {
       return;
     }
 
+    this.token = token; // Store token for authorizer
+
     const channelName = `private-org-${organizationId}`;
     const channel = this.client.subscribe(channelName);
+    Logger.info(`Attempting to subscribe to ${channelName}`);
 
-    channel.bind("pusher:subscription_succeeded", () =>
-      Logger.info(`Subscribed to ${channelName}`)
-    );
+    // Handle subscription events
+    channel.bind("pusher:subscription_succeeded", () => {
+      Logger.info(`Successfully subscribed to ${channelName}`);
+      this.bot.telegram.sendMessage(
+        userId,
+        "Successfully subscribed to notifications!"
+      );
+    });
+
     channel.bind("pusher:subscription_error", (error: any) => {
       Logger.error("Pusher subscription error:", error);
       this.bot.telegram.sendMessage(
@@ -46,49 +85,26 @@ export class PusherService {
         "Failed to subscribe to notifications."
       );
     });
-    channel.bind("deposit", (data: any) =>
+
+    channel.bind("deposit", (data: any) => {
       this.bot.telegram.sendMessage(
         userId,
         `💰 *New Deposit*: ${data.amount} USDC on Solana`
-      )
-    );
+      );
+    });
 
-    // Authorize the channel
-    try {
-      const socketId = this.client.connection.socket_id;
-      if (!socketId) {
-        Logger.error("Pusher socket ID not available yet.");
-        await this.bot.telegram.sendMessage(
+    // Ensure Pusher is connected before proceeding
+    if (this.client.connection.state !== "connected") {
+      this.client.connection.bind("connected", () => {
+        Logger.info("Pusher client connected");
+      });
+      this.client.connection.bind("error", (error: any) => {
+        Logger.error("Pusher connection error:", error);
+        this.bot.telegram.sendMessage(
           userId,
-          "Notification setup failed: Pusher not ready."
+          "Failed to connect to notification service."
         );
-        return;
-      }
-
-      Logger.info("Authorizing Pusher channel:", {
-        socketId,
-        channelName,
-        token,
       });
-      const response = await axios.post(
-        `${this.copperxApiUrl}/api/notifications/auth`,
-        {
-          socket_id: socketId,
-          channel_name: channelName,
-        },
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
-      Logger.info("Pusher auth response:", response.data);
-    } catch (error: any) {
-      Logger.error("Pusher authorization error:", {
-        message: error.message,
-        response: error.response?.data,
-        status: error.response?.status,
-      });
-      await this.bot.telegram.sendMessage(
-        userId,
-        "Failed to authorize notifications."
-      );
     }
   }
 }

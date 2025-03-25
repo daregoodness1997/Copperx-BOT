@@ -1,17 +1,22 @@
 import { Telegraf, Markup, Context } from "telegraf";
-import { Update, Message } from "telegraf/typings/core/types/typegram";
+import {
+  Update,
+  Message,
+  CallbackQuery,
+  MaybeInaccessibleMessage,
+} from "telegraf/typings/core/types/typegram";
 import { CopperxService } from "../services/copperx";
 import { PusherService } from "../services/pusher";
 import { SessionManager } from "./session";
 import { Logger } from "../utils/logger";
 
-const MAX_SAFE_BIGINT = BigInt("9223372036854775807");
 interface Wallet {
   walletAddress: string;
   walletType: string;
   id: string;
   isDefault?: boolean;
 }
+
 interface WalletBalance {
   walletId: string;
   balances: {
@@ -24,15 +29,44 @@ interface WalletBalance {
 
 interface Session {
   token: string;
+  expires?: number;
+  organizationId?: string;
+  hasSeenGreeting?: boolean;
   wizard?: {
     step: string;
     data: {
-      selectedWalletId: string | null;
+      selectedWalletId?: string | null;
+      email?: string;
+      sid?: string;
+      amount?: number;
+      recipient?: string;
+      address?: string;
+      type?: string;
+      bankId?: string;
+      withdrawData?: {
+        amount: number;
+        bankId: string;
+        invoiceNumber?: string;
+        invoiceUrl?: string;
+        purposeCode?: string;
+        sourceOfFunds?: string;
+        recipientRelationship?: string;
+        quotePayload?: string;
+        quoteSignature?: string;
+        preferredWalletId?: string;
+        customerData?: {
+          name: string;
+          businessName: string;
+          email: string;
+          country: string;
+        };
+        sourceOfFundsFile?: string;
+        note?: string;
+      };
     };
   };
 }
 
-// Type definitions based on the response payload
 interface TransactionHistoryResponse {
   page: number;
   limit: number;
@@ -134,7 +168,6 @@ interface Account {
   payeeDisplayName?: string;
 }
 
-// Type alias for matched context in regex actions
 type MatchedContext<C extends Context, T extends Update> = C & {
   match: RegExpExecArray;
 };
@@ -196,6 +229,47 @@ export class BotWizard {
       /wizard_confirm_withdraw_(.+)_(.+)/,
       this.confirmWithdraw.bind(this)
     );
+    this.bot.action("withdraw_purpose_self", async (ctx) => {
+      const userId = ctx.from!.id.toString();
+      const session = await this.sessionManager.get(userId);
+      if (session.wizard) {
+        session.wizard.data.withdrawData!.purposeCode = "self";
+        session.wizard.step = "withdraw_source";
+        await this.sessionManager.set(userId, session);
+        await ctx.answerCbQuery();
+        await ctx.reply("Enter source of funds (e.g., salary, savings):");
+      }
+    });
+    this.bot.action("withdraw_purpose_family", async (ctx) => {
+      const userId = ctx.from!.id.toString();
+      const session = await this.sessionManager.get(userId);
+      if (session.wizard) {
+        session.wizard.data.withdrawData!.purposeCode = "family";
+        session.wizard.step = "withdraw_source";
+        await this.sessionManager.set(userId, session);
+        await ctx.answerCbQuery();
+        await ctx.reply("Enter source of funds (e.g., salary, savings):");
+      }
+    });
+    this.bot.action("withdraw_purpose_business", async (ctx) => {
+      const userId = ctx.from!.id.toString();
+      const session = await this.sessionManager.get(userId);
+      if (session.wizard) {
+        session.wizard.data.withdrawData!.purposeCode = "business";
+        session.wizard.step = "withdraw_source";
+        await this.sessionManager.set(userId, session);
+        await ctx.answerCbQuery();
+        await ctx.reply("Enter source of funds (e.g., salary, savings):");
+      }
+    });
+    this.bot.action(
+      /^set_wallet_(.+)$/,
+      this.handleSetDefaultWallet.bind(this)
+    );
+    this.bot.action(
+      "wizard_confirm_default",
+      this.handleSetDefaultWallet.bind(this)
+    );
     this.bot.on("text", this.handleText.bind(this));
   }
 
@@ -220,6 +294,7 @@ export class BotWizard {
     await ctx.answerCbQuery();
     await this.displayMainMenu(ctx);
   }
+
   private async handleWalletMenuAction(ctx: Context<Update>): Promise<void> {
     await ctx.answerCbQuery();
     await this.displayWalletMenu(ctx);
@@ -238,17 +313,8 @@ export class BotWizard {
         ],
         [
           Markup.button.callback("Wallets Management", "wizard_wallet"),
-          Markup.button.callback("Fund Transfer", "wizard_deposit"),
-          Markup.button.callback("Transfer", "wizard_transfer"),
-        ],
-        [
           Markup.button.callback("Check Balance", "wizard_balance"),
-          Markup.button.callback("Deposit", "wizard_deposit"),
           Markup.button.callback("Transfer", "wizard_transfer"),
-        ],
-        [
-          Markup.button.callback("Withdraw", "wizard_withdraw"),
-          Markup.button.callback("Help", "wizard_help"),
         ],
       ])
     );
@@ -290,9 +356,22 @@ export class BotWizard {
     const session = await this.sessionManager.get(userId);
 
     try {
-      // Get current session and ensure wizard exists
       const currentSession = await this.sessionManager.get(userId);
-      if (!currentSession.wizard) {
+      const callbackData = (ctx.callbackQuery as CallbackQuery.DataQuery)?.data;
+      Logger.info(`Callback data received: ${callbackData}`);
+
+      // Handle wallet selection
+      if (callbackData?.startsWith("set_wallet_")) {
+        const walletId = callbackData.split("_")[2];
+        Logger.info(`Selected wallet ID: ${walletId}`);
+        await this.sessionManager.set(userId, {
+          wizard: {
+            step: "set_default_wallet",
+            data: { selectedWalletId: walletId },
+          },
+        });
+      } else if (!currentSession.wizard) {
+        Logger.info("Initializing wizard session");
         await this.sessionManager.set(userId, {
           wizard: {
             step: "set_default_wallet",
@@ -301,35 +380,36 @@ export class BotWizard {
         });
       }
 
-      // Fetch wallets from API
       const wallets = (await this.copperx.request(
         "GET",
         "/api/wallets",
         null,
         session.token
       )) as Wallet[];
+      Logger.info(
+        `Fetched ${wallets.length} wallets: ${JSON.stringify(
+          wallets.map((w) => w.id)
+        )}`
+      );
 
-      Logger.info(wallets, "wallets information");
-
-      // Get current selected wallet ID from session
       const selectedWalletId =
         currentSession.wizard?.data.selectedWalletId || null;
+      Logger.info(`Current selected wallet ID: ${selectedWalletId}`);
 
-      // Create radio buttons for each wallet with checkmark for selected
+      // Generate wallet buttons
       const walletButtons = wallets.map((wallet) => {
         const isSelected = wallet.id === selectedWalletId;
-        const buttonText = `${wallet.walletAddress} ${isSelected ? " ✅" : ""}`;
-
-        return [
-          Markup.button.callback(
-            buttonText,
-            `set_wallet_${wallet.id}`,
-            wallet.isDefault && !selectedWalletId // Only show as default if no selection override
-          ),
-        ];
+        const buttonText = `${wallet.walletAddress}${isSelected ? " ✅" : ""}`;
+        Logger.info(`Button for wallet ${wallet.id}: ${buttonText}`);
+        return [Markup.button.callback(buttonText, `set_wallet_${wallet.id}`)];
       });
 
-      // Add navigation buttons
+      if (walletButtons.length === 0) {
+        Logger.info("No wallet buttons generated");
+        await ctx.reply("No wallets found!");
+        return;
+      }
+
       const navigationButtons = [
         [
           Markup.button.callback("Back", "wizard_main_menu"),
@@ -337,50 +417,62 @@ export class BotWizard {
         ],
       ];
 
+      const newKeyboard = Markup.inlineKeyboard([
+        ...walletButtons,
+        ...navigationButtons,
+      ]);
+      const newText = "Select your default wallet:";
+
       await ctx.answerCbQuery();
-      // Edit existing message if callback, otherwise send new
+
       if (ctx.callbackQuery?.message) {
-        await ctx.editMessageText(
-          "Select your default wallet:",
-          Markup.inlineKeyboard([...walletButtons, ...navigationButtons])
-        );
+        const currentMessage = ctx.callbackQuery.message;
+        const isAccessibleMessage = (
+          msg: MaybeInaccessibleMessage
+        ): msg is Message =>
+          "chat" in msg &&
+          "message_id" in msg &&
+          !("date" in msg && msg.date === 0);
+
+        const isTextMessage = (
+          msg: MaybeInaccessibleMessage
+        ): msg is Message.TextMessage =>
+          isAccessibleMessage(msg) && "text" in msg && "reply_markup" in msg;
+
+        let shouldUpdate = true;
+        if (isTextMessage(currentMessage)) {
+          shouldUpdate =
+            currentMessage.text !== newText ||
+            JSON.stringify(currentMessage.reply_markup) !==
+              JSON.stringify(newKeyboard.reply_markup);
+        }
+
+        if (shouldUpdate) {
+          Logger.info("Updating message with new wallet selection");
+          await ctx.editMessageText(newText, newKeyboard);
+        } else {
+          Logger.info("No update needed - message content unchanged");
+        }
       } else {
-        await ctx.reply(
-          "Select your default_wallet:",
-          Markup.inlineKeyboard([...walletButtons, ...navigationButtons])
-        );
+        Logger.info("Sending new message with wallet selection");
+        await ctx.reply(newText, newKeyboard);
       }
 
-      // Handle wallet selection callback
-      this.bot.action(/^set_wallet_(.+)$/, async (ctx) => {
-        const selectedWalletId = ctx.match[1];
-        await this.sessionManager.set(userId, {
-          wizard: {
-            step: "set_default_wallet",
-            data: { selectedWalletId },
-          },
-        });
-
-        await this.handleSetDefaultWallet(ctx);
-      });
-
-      // Handle confirmation callback
-      this.bot.action("wizard_confirm_default", async (ctx) => {
+      // Handle confirmation
+      if (callbackData === "wizard_confirm_default") {
         const currentSession = await this.sessionManager.get(userId);
-
         if (!currentSession.wizard || !currentSession.wizard.data) {
           await ctx.reply("Session expired. Please start over.");
           return;
         }
 
         const selectedWalletId = currentSession.wizard.data.selectedWalletId;
-
         if (!selectedWalletId) {
           await ctx.reply("Please select a wallet first!");
           return;
         }
 
-        // Update default wallet via API
+        Logger.info(`Confirming default wallet: ${selectedWalletId}`);
         await this.copperx.request(
           "POST",
           `/api/wallets/default`,
@@ -388,12 +480,8 @@ export class BotWizard {
           session.token
         );
 
-        // Clear selection after successful update
         await this.sessionManager.set(userId, {
-          wizard: {
-            step: "set_default_wallet",
-            data: { selectedWalletId: null },
-          },
+          // Clear wizard state after confirmation
         });
 
         await ctx.reply(
@@ -402,12 +490,18 @@ export class BotWizard {
             [Markup.button.callback("Back to Menu", "wizard_main_menu")],
           ])
         );
-        await this.handleSetDefaultWallet(ctx);
-      });
-    } catch (error) {
+      }
+    } catch (error: any) {
+      if (
+        error.response?.error_code === 400 &&
+        error.response?.description?.includes("message is not modified")
+      ) {
+        Logger.info("Message not modified error ignored");
+        return;
+      }
       Logger.error(error, "Error in handleSetDefaultWallet");
       await ctx.reply(
-        "An error occurred while fetching wallets. Please try again."
+        "An error occurred while managing wallets. Please try again."
       );
     }
   }
@@ -464,7 +558,6 @@ export class BotWizard {
 
     await ctx.reply(
       message,
-
       Markup.inlineKeyboard([
         [Markup.button.callback("Back to Menu", "wizard_main_menu")],
       ])
@@ -477,7 +570,6 @@ export class BotWizard {
     const userId = ctx.from!.id.toString();
     await ctx.answerCbQuery();
 
-    // Check if user is logged in
     if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
         "🔒 You need to log in first.",
@@ -490,16 +582,12 @@ export class BotWizard {
 
     try {
       const session = await this.sessionManager.get(userId);
-
-      // Fetch transaction history
       const response = (await this.copperx.request(
         "GET",
-        "/api/transfers",
+        "/api/transfers?page=1&limit=10",
         null,
         session.token
       )) as TransactionHistoryResponse;
-
-      Logger.info(response, "transactions");
 
       if (!response.data || response.data.length === 0) {
         await ctx.reply(
@@ -511,7 +599,6 @@ export class BotWizard {
         return;
       }
 
-      // Format transactions for display
       const transactionsText = response.data
         .map((tx, index) => {
           const date = new Date(tx.createdAt).toLocaleDateString();
@@ -536,7 +623,6 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
         })
         .join("\n");
 
-      // Create pagination buttons
       const paginationButtons = [];
       if (response.page > 1) {
         paginationButtons.push(
@@ -561,7 +647,6 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
         Markup.inlineKeyboard(keyboard)
       );
 
-      // Handle pagination callbacks
       this.bot.action(/^tx_page_(\d+)$/, async (ctx) => {
         const page = parseInt(ctx.match[1]);
         const paginatedResponse = (await this.copperx.request(
@@ -669,7 +754,6 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
 
     await ctx.reply(
       message,
-
       Markup.inlineKeyboard([
         [Markup.button.callback("Back to Menu", "wizard_main_menu")],
       ])
@@ -700,7 +784,6 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
 
     await ctx.reply(
       message,
-
       Markup.inlineKeyboard([
         [Markup.button.callback("Back to Menu", "wizard_main_menu")],
       ])
@@ -753,10 +836,26 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
 
   private async handleWithdraw(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
-    await this.sessionManager.set(userId, {
-      wizard: { step: "withdraw_amount", data: {} },
-    });
     await ctx.answerCbQuery();
+
+    if (!(await this.sessionManager.isValid(userId))) {
+      await ctx.reply(
+        "🔒 You need to log in first.",
+        Markup.inlineKeyboard([
+          [Markup.button.callback("Login", "wizard_login")],
+        ])
+      );
+      return;
+    }
+
+    await this.sessionManager.set(userId, {
+      wizard: {
+        step: "withdraw_amount",
+        data: {
+          withdrawData: {},
+        },
+      },
+    });
     await ctx.reply("Please enter the amount to withdraw (e.g., 10):");
   }
 
@@ -775,13 +874,13 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
       ])
     );
   }
+
   private async handleCheckKYC(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     const session = await this.sessionManager.get(userId);
     let hasKyc;
     await ctx.answerCbQuery();
 
-    // Check if user is logged in
     if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
         "🔒 You need to log in to view your kyc status.",
@@ -828,13 +927,13 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
       );
     }
   }
+
   private async handleCheckProfile(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     const session = await this.sessionManager.get(userId);
     let profile = "";
     await ctx.answerCbQuery();
 
-    // Check if user is logged in
     if (!(await this.sessionManager.isValid(userId))) {
       await ctx.reply(
         "🔒 You need to log in to view your profile.",
@@ -856,7 +955,6 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
     if (data.error) {
       await ctx.reply(`Error: ${data.error}`);
     } else {
-      // Format profile info nicely
       profile = `
 👤 *Your Profile*
 - *Name*: ${data.firstName} ${data.lastName}
@@ -912,7 +1010,7 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
   private async handleText(ctx: Context<Update>): Promise<void> {
     const userId = ctx.from!.id.toString();
     const message = ctx.message as Message.TextMessage | undefined;
-    if (!message || !("text" in message)) return; // Ensure it's a text message
+    if (!message || !("text" in message)) return;
     const text = message.text.trim();
     const session = await this.sessionManager.get(userId);
     const wizard = session.wizard;
@@ -940,7 +1038,6 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
         "/api/auth/email-otp/authenticate",
         { otp: text, email: wizard.data.email, sid: wizard.data.sid }
       );
-      Logger.info("Login authenticate response:", data);
       if (data.error) {
         await ctx.reply(`Error: ${data.error}`);
       } else {
@@ -955,12 +1052,8 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
         await this.sessionManager.set(userId, {
           token: data.accessToken,
           expires: Date.now() + 3600000,
-          organizationId: data.organizationId,
+          organizationId: data.user.organizationId,
         });
-        Logger.info(
-          "Session after login:",
-          await this.sessionManager.get(userId)
-        );
         await this.pusher.setup(
           userId,
           data.accessToken,
@@ -1008,20 +1101,64 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
         walletAddress: text,
         purposeCode: "self",
       });
-    } else if (wizard.step === "withdraw_amount") {
-      const amount = parseFloat(text);
-      if (isNaN(amount)) {
-        await ctx.reply("Invalid amount. Please enter a number (e.g., 10):");
-        return;
+    } else if (wizard.step.startsWith("withdraw_")) {
+      const withdrawData = wizard.data.withdrawData || {};
+
+      switch (wizard.step) {
+        case "withdraw_amount":
+          const amount = parseFloat(text);
+          if (isNaN(amount)) {
+            await ctx.reply(
+              "Invalid amount. Please enter a number (e.g., 10):"
+            );
+            return;
+          }
+          withdrawData.amount = amount;
+          wizard.step = "withdraw_bank";
+          await this.sessionManager.set(userId, { wizard });
+          await ctx.reply("Please enter the bank ID:");
+          break;
+
+        case "withdraw_bank":
+          withdrawData.bankId = text;
+          wizard.step = "withdraw_purpose";
+          await this.sessionManager.set(userId, { wizard });
+          await ctx.reply(
+            "Select purpose code:",
+            Markup.inlineKeyboard([
+              [Markup.button.callback("Self", "withdraw_purpose_self")],
+              [Markup.button.callback("Family", "withdraw_purpose_family")],
+              [Markup.button.callback("Business", "withdraw_purpose_business")],
+            ])
+          );
+          break;
+
+        case "withdraw_source":
+          withdrawData.sourceOfFunds = text;
+          wizard.step = "withdraw_relationship";
+          await this.sessionManager.set(userId, { wizard });
+          await ctx.reply(
+            "Enter recipient relationship (e.g., self, family, business):"
+          );
+          break;
+
+        case "withdraw_relationship":
+          withdrawData.recipientRelationship = text;
+          wizard.step = "withdraw_note";
+          await this.sessionManager.set(userId, { wizard });
+          await ctx.reply(
+            "Enter any additional notes (or type 'skip' to skip):"
+          );
+          break;
+
+        case "withdraw_note":
+          if (text.toLowerCase() !== "skip") {
+            withdrawData.note = text;
+          }
+          await this.sessionManager.set(userId, { wizard });
+          await this.processWithdraw(ctx, userId);
+          break;
       }
-      wizard.data.amount = amount;
-      wizard.step = "withdraw_bank";
-      await this.sessionManager.set(userId, { wizard });
-      await ctx.reply("Please enter the bank ID:");
-    } else if (wizard.step === "withdraw_bank") {
-      wizard.data.bankId = text;
-      await this.sessionManager.set(userId, { wizard });
-      await this.processWithdraw(ctx, userId);
     }
   }
 
@@ -1042,13 +1179,12 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
       return;
     }
     const session = await this.sessionManager.get(userId);
-    Logger.info("Session:", session);
     const wizard = session.wizard!;
     const data = await this.copperx.request(
       "POST",
       `/api/transfers/${endpoint}`,
       {
-        amount: String(BigInt(Math.floor(wizard.data.amount * 1000000000))),
+        amount: String(BigInt(Math.floor(wizard.data.amount! * 1000000000))),
         currency: "USDC",
         ...extraData,
       },
@@ -1091,30 +1227,52 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
       await this.sessionManager.clearWizard(userId);
       return;
     }
+
     const session = await this.sessionManager.get(userId);
     const wizard = session.wizard!;
+    const withdrawData = wizard.data.withdrawData!;
+    const fee = withdrawData.amount * 0.01; // 1% fee example
+
+    const payload = {
+      amount: withdrawData.amount,
+      bankId: withdrawData.bankId,
+      currency: "USDC",
+      invoiceNumber: withdrawData.invoiceNumber,
+      invoiceUrl: withdrawData.invoiceUrl,
+      purposeCode: withdrawData.purposeCode || "self",
+      sourceOfFunds: withdrawData.sourceOfFunds,
+      recipientRelationship: withdrawData.recipientRelationship,
+      quotePayload: withdrawData.quotePayload,
+      quoteSignature: withdrawData.quoteSignature,
+      preferredWalletId: withdrawData.preferredWalletId,
+      customerData: withdrawData.customerData,
+      sourceOfFundsFile: withdrawData.sourceOfFundsFile,
+      note: withdrawData.note,
+    };
+
     const data = await this.copperx.request(
       "POST",
       "/api/transfers/offramp",
-      {
-        amount: wizard.data.amount,
-        bankId: wizard.data.bankId,
-        currency: "USDC",
-      },
+      payload,
       session.token
     );
+
     if (data.error) {
       await ctx.reply(`Error: ${data.error}`);
     } else {
       await ctx.reply(
-        `Confirm withdrawal of ${wizard.data.amount} USDC to bank ${
-          wizard.data.bankId
-        }? Fee: ${data.fee || 0}`,
+        `Confirm withdrawal of ${withdrawData.amount} USDC to bank ${
+          withdrawData.bankId
+        }?\nFee: ${fee} USDC\nPurpose: ${payload.purposeCode}\nSource: ${
+          payload.sourceOfFunds
+        }\nRelationship: ${payload.recipientRelationship}${
+          payload.note ? `\nNote: ${payload.note}` : ""
+        }`,
         Markup.inlineKeyboard([
           [
             Markup.button.callback(
               "Yes",
-              `wizard_confirm_withdraw_${wizard.data.amount}_${wizard.data.bankId}`
+              `wizard_confirm_withdraw_${withdrawData.amount}_${withdrawData.bankId}`
             ),
             Markup.button.callback("No", "wizard_cancel"),
           ],
@@ -1172,12 +1330,32 @@ Fee: ${tx.totalFee} ${tx.feeCurrency}
     const [amount, bankId] = ctx.match.slice(1);
     const userId = ctx.from!.id.toString();
     const session = await this.sessionManager.get(userId);
+    const withdrawData = session.wizard!.data.withdrawData!;
+
+    const payload = {
+      amount: parseFloat(amount),
+      bankId,
+      currency: "USDC",
+      invoiceNumber: withdrawData.invoiceNumber,
+      invoiceUrl: withdrawData.invoiceUrl,
+      purposeCode: withdrawData.purposeCode || "self",
+      sourceOfFunds: withdrawData.sourceOfFunds,
+      recipientRelationship: withdrawData.recipientRelationship,
+      quotePayload: withdrawData.quotePayload,
+      quoteSignature: withdrawData.quoteSignature,
+      preferredWalletId: withdrawData.preferredWalletId,
+      customerData: withdrawData.customerData,
+      sourceOfFundsFile: withdrawData.sourceOfFundsFile,
+      note: withdrawData.note,
+    };
+
     const data = await this.copperx.request(
       "POST",
       "/api/transfers/offramp",
-      { amount: parseFloat(amount), bankId, currency: "USDC" },
+      payload,
       session.token
     );
+
     await this.sessionManager.clearWizard(userId);
     await ctx.reply(
       data.error
