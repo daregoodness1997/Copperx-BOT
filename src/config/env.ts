@@ -26,6 +26,10 @@ export class EnvConfig {
     return this.ensureEnv("PUSHER_CLUSTER");
   }
 
+  static get redisUrl(): string {
+    return this.ensureEnv("REDIS_URL");
+  }
+
   private static ensureEnv(key: string): string {
     const value = process.env[key];
     if (!value) throw new Error(`Missing environment variable: ${key}`);
