@@ -42,6 +42,7 @@ A Telegram bot built with Node.js and TypeScript to interact with the Copperx AP
    COPPERX_API_URL=https://api.copperx.com
    PUSHER_KEY=your-pusher-key
    PUSHER_CLUSTER=your-pusher-cluster
+   REDIS_URL=your-redis-url
    ```
 
    - Get `TELEGRAM_TOKEN` from [BotFather](https://t.me/BotFather).
@@ -166,6 +167,7 @@ Add these to `package.json`:
 | `COPPERX_API_URL` | Copperx API base URL   | `https://api.copperx.com`     |
 | `PUSHER_KEY`      | Pusher app key         | `your-pusher-key`             |
 | `PUSHER_CLUSTER`  | Pusher cluster         | `us2`                         |
+| `REDIS_URL`       | Redis url              | `redis://localhost:6379`      |
 
 ## Future Improvements
 
