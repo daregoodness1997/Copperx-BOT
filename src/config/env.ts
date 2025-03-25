@@ -29,6 +29,15 @@ export class EnvConfig {
   static get redisUrl(): string {
     return this.ensureEnv("REDIS_URL");
   }
+  static get redisUsername(): string {
+    return this.ensureEnv("REDIS_USERNAME");
+  }
+  static get redisPassword(): string {
+    return this.ensureEnv("REDIS_PASSWORD");
+  }
+  static get redisPort(): string {
+    return this.ensureEnv("REDIS_PORT");
+  }
 
   private static ensureEnv(key: string): string {
     const value = process.env[key];

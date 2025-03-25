@@ -19,7 +19,14 @@ export class SessionManager {
   private client: RedisClientType;
 
   constructor() {
-    this.client = createClient({ url: EnvConfig.redisUrl });
+    this.client = createClient({
+      username: EnvConfig.redisUsername,
+      password: EnvConfig.redisPassword,
+      socket: {
+        host: EnvConfig.redisUrl,
+        port: Number(EnvConfig.redisPort),
+      },
+    });
     this.client.on("error", (err) => Logger.error("Redis Client Error", err));
     this.connect();
   }
